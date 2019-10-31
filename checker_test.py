@@ -1,0 +1,173 @@
+#!/usr/bin/python
+
+import boto3
+import re
+import time
+import csv
+import argparse
+
+##	Defining arguments
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-v', '--verbose', help='Verbose mode', action='store_true')
+parser.add_argument('-n', '--nonreport', help='If is checked no report will be generated', action='store_true')
+parser.add_argument('-l', '--logs', help='Analyze logs files', action='store_true')
+args = parser.parse_args()
+
+##	Creating AWS clients and resources
+
+client_s3 = boto3.client('s3')
+s3 = boto3.resource('s3')
+
+##	Creating regex
+
+patron_exclusion_files = re.compile(r'([\w](.ZIP|.RAR|.7Z|.TAR|.GZ|.DOC|.XLS|.PPT)$)')
+patron_keystore = re.compile(r'([\w](.KDBX|.HC|.KDB|.WALLETX)$)')
+patron_name_key = re.compile(r'(USUARIO|USER|PASSWORD|CLIENTE|NOMINA|CONTRASENA|CREDENCIAL|DNI|CONFIDENCIAL|SECRET|INTERNO|KEY|CONTRATO)')
+patron_noname_key = re.compile(r'(LOG|CLOUDTRAIL)')
+
+timestamp = str(time.time())
+timestamp = timestamp[:(len(timestamp))-3]
+
+##      Initializing CSV
+
+if(args.nonreport is False):
+	myData = [['object','object_name','object_key','id','title','details','risk','confidence']]
+	myFile = open('Scan_Results_' + timestamp + '.csv', 'w')
+	with myFile:
+		writer = csv.writer(myFile)
+		writer.writerows(myData)
+
+##	Creating variables
+
+inf_vuln = 0
+low_vuln = 0
+med_vuln = 0
+hig_vuln = 0
+
+inf_list = []
+low_list = []
+med_list = []
+hig_list = []
+
+cont_s3 = 0
+cont_s3_key = 0
+cont_s3_key_skip = 0
+
+
+##	Defining addional functions
+
+def write_vuln(object, object_name, object_key, id, title, details, risk, confidence):
+	global inf_vuln
+	global inf_list
+	global low_vuln
+	global low_list
+	global med_vuln
+	global med_list
+	global hig_vuln
+	global hig_list
+	if(object == 's3'):
+		if(risk == 'INFO'):
+			inf_vuln = inf_vuln + 1
+			inf_list.append(details)
+		if(risk == 'LOW'):
+			low_vuln = low_vuln + 1
+			low_list.append(details)
+		if(risk == 'MEDIUM'):
+			med_vuln = med_vuln + 1
+			med_list.append(details)
+		if(risk == 'HIGH'):
+			hig_vuln = hig_vuln + 1
+			hig_list.append(details)
+	if(args.nonreport is False):
+		myData = [[object,object_name,object_key,id,title,details,risk,confidence]]
+		myFile = open('Scan_Results_' + timestamp + '.csv', 'a')
+		with myFile:
+			writer = csv.writer(myFile)
+			writer.writerows(myData)
+
+def s3_sensitive_checker(bucket):
+	global cont_sus
+	global cont_s3
+	global cont_s3_key
+	global cont_s3_key_skip
+	global sus_list
+	
+	s = patron_noname_key.search(bucket.upper())
+	if((not s) or (args.logs)):
+		bucket_s3 = s3.Bucket(bucket)
+		for objeto in bucket_s3.objects.all():
+			cont_s3_key = cont_s3_key + 1
+			key = objeto.key
+			key_mayus = key.upper()
+		
+			# No analyzed logs files
+			s = patron_noname_key.search(key_mayus)
+			if((not s) or (args.logs)):
+			# Check for key store files
+				s = patron_keystore.search(key_mayus)
+				if(s):
+					write_vuln('s3',bucket,key,'VS2','Key Store file detected','HIGH - Key Store file detected:  BUCKET: ' + bucket + '  FILE: ' + key, 'HIGH','Medium')
+					if(args.verbose):
+						print('\t [-] Key Store file detected: ' + key)
+				else:
+					# Check for suspicius file names
+					s = patron_name_key.search(key_mayus)
+					if(s):
+						if(args.verbose):
+							print('\t [-] Suspicius name file: ' + key)
+						write_vuln('s3',bucket,key,'VS1','Suspicius name file in S3','INFO - Suspicius name file detected:  BUCKET: ' + bucket + '  FILE: ' + key, 'INFO','Low')
+					# Some type files will not be analyzed
+                			s = patron_exclusion_files.search(key_mayus)
+                			if(not s):
+						#try:
+						#body = objeto.get()['Body'].read()
+						#except:
+						#       continue
+						#body_mayus = body.upper()
+						continue
+					else:
+						cont_s3_key_skip = cont_s3_key_skip + 1
+			else:
+				cont_s3_key_skip = cont_s3_key_skip + 1
+
+
+def show_risks():
+	print('[+] TOTAL risks found:\t\t' + str(inf_vuln+low_vuln+med_vuln+hig_vuln))
+	print('\t[-] INFO risks found:\t' + str(inf_vuln))
+	print('\t[-] LOW risks found:\t' + str(low_vuln))
+	print('\t[-] MEDIUM risks found:\t' + str(med_vuln))
+	print('\t[-] HIGH risks found:\t' + str(hig_vuln))
+	print('[+] Detailed results:')
+	print('\t[-] INFO risks found:\t' + str(inf_vuln))
+	if(inf_vuln > 0):
+        	for vulnerability in inf_list:
+                	print('\t\t[-] ' + vulnerability)
+	print('\t[-] LOW risks found:\t' + str(low_vuln))
+	if(low_vuln > 0):
+        	for vulnerability in low_list:
+                	print('\t\t[-] ' + vulnerability)
+	print('\t[-] MEDIUM risks found:\t' + str(med_vuln))
+	if(med_vuln > 0):
+        	for vulnerability in med_list:
+                	print('\t\t[-] ' + vulnerability)
+	print('\t[-] HIGH risks found:\t' + str(hig_vuln))
+	if(hig_vuln > 0):
+        	for vulnerability in hig_list:
+                	print('\t\t[-] ' + vulnerability)
+	print('')
+
+## __MAIN__
+
+response_all = client_s3.list_buckets()
+
+print('')
+print('[+] Sensitive Data Checker v0.1 (alpha) by Alvaro Trigo')
+print('[+] Starting analysis at ' + time.strftime('%c'))
+for bucket in response_all['Buckets']:
+	cont_s3 = cont_s3 + 1
+	print('[+] Analyzing bucket ' + bucket['Name'] + '...')
+	s3_sensitive_checker(bucket['Name'])
+print('[+] Analysis finished at ' + time.strftime('%c'))
+print('[+] ' + str(cont_s3) + ' buckets and ' + str(cont_s3_key) + ' files analyzed (' + str(cont_s3_key_skip) + ' skipped)')
+show_risks()
